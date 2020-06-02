@@ -23,21 +23,26 @@ import { DiscordDefaultFileOptions, DiscordDefaultNotificationOptions } from './
 import { DiscordFileOptions, DiscordNotificationOptions } from './discord.interface';
 import { DiscordAccountData } from './discord.account.interface';
 import { MarkdownParser } from 'src/description-parsing/markdown/markdown.parser';
+import * as lowdb from 'lowdb';
+import { Settings } from 'src/settings/settings.interface';
 
 @Injectable()
 export class Discord extends Website {
   private readonly logger = new Logger(Discord.name);
+  private readonly settings: lowdb.LowdbSync<Settings> = global.settingsDB;
 
   readonly BASE_URL: string = '';
   readonly acceptsFiles: string[] = []; // accepts all
   readonly acceptsAdditionalFiles: boolean = true;
   readonly enableAdvertisement: boolean = false;
+  readonly acceptsSourceUrls: boolean = true;
 
   readonly fileSubmissionOptions: DiscordFileOptions = DiscordDefaultFileOptions;
   readonly notificationSubmissionOptions: DiscordNotificationOptions = DiscordDefaultNotificationOptions;
   readonly defaultDescriptionParser = MarkdownParser.parse;
 
   readonly usernameShortcuts = [];
+  private maxMBPerFile = 8;
 
   async checkLoginStatus(data: UserAccountEntity): Promise<LoginResponse> {
     const status: LoginResponse = { loggedIn: false, username: null };
@@ -58,7 +63,7 @@ export class Discord extends Website {
   }
 
   getScalingOptions(file: FileRecord): ScalingOptions {
-    return { maxSize: FileSize.MBtoBytes(8) };
+    return { maxSize: FileSize.MBtoBytes(this.maxMBPerFile) };
   }
 
   async postNotificationSubmission(
@@ -72,8 +77,6 @@ export class Discord extends Website {
 
     const json = {
       content: mentions.length ? mentions.join(' ') : undefined,
-      username: 'PostyBirb',
-      avatar_url: 'https://i.imgur.com/l2mt2Q7.png',
       allowed_mentions: {
         parse: ['everyone', 'users', 'roles'],
       },
@@ -81,12 +84,17 @@ export class Discord extends Website {
         {
           title: data.options.useTitle ? data.title : undefined,
           description,
-          footer: {
-            text: 'Posted using PostyBirb',
-          },
+          color: data.options.embedColor || accountData.embedColor
         },
       ],
     };
+
+    this.logger.log("Advertise Setting: " + this.settings.get("advertise").value());
+    if (this.settings.get("advertise").value()) {
+      json["username"] = "PostyBirb";
+      json["avatar_url"] = "https://i.imgur.com/l2mt2Q7.png";
+      json.embeds[0]["footer"] = "Posted using PostyBirb";
+    }
 
     this.checkCancelled(cancellationToken);
     const res = await Http.post<any>(accountData.webhook.trim(), '', {
@@ -113,43 +121,87 @@ export class Discord extends Website {
     data: FilePostData<DiscordFileOptions>,
     accountData: DiscordAccountData,
   ): Promise<PostResponse> {
-    if (data.description && data.description.length) {
-      await this.postNotificationSubmission(
-        cancellationToken,
-        data as PostData<Submission, DiscordFileOptions>,
-        accountData,
-      );
+    this.logger.log("Sources: ");
+    this.logger.log([...data.options.sources, ...data.sources]
+      .filter(s => s)
+      .slice(0, 5)
+      .join('%0A'));
+      /*await this.postNotificationSubmission(
+            cancellationToken,
+            data as PostData<Submission, DiscordFileOptions>,
+            accountData,
+        );*/
+
+    var json = {};
+
+    if ((data.description && data.description.length) || data.options.useTitle) {
+      let description = data.description.substring(0, 2000).trim();
+
+      const mentions = description.match(/(<){0,1}@(&){0,1}[a-zA-Z0-9]+(>){0,1}/g) || [];
+
+      json = {
+        content: mentions.length ? mentions.join(' ') : undefined,
+        allowed_mentions: {
+          parse: ['everyone', 'users', 'roles'],
+        },
+        embeds: [
+          {
+            title: data.options.useTitle ? data.title : undefined,
+            description,
+            color: data.options.embedColor || accountData.embedColor
+          },
+        ],
+      };
     }
 
-    const formData = {
-      username: 'PostyBirb',
-      avatar_url: 'https://i.imgur.com/l2mt2Q7.png',
-    };
+    // There should be an easier way to get the setting for advertise, but I'm not sure how it's set up so for now this will do.
+    this.logger.log("Advertise Setting: " + this.settings.get("advertise").value());
+    if (this.settings.get("advertise").value()) {
+      json['username'] = "PostyBirb";
+      json['avatar_url'] = "https://i.imgur.com/l2mt2Q7.png";
+      if (!json['embeds']) json['embeds'] = {};
+      json['embeds'][0]['footer'] = {};
+      json['embeds'][0]['footer']['text'] = "Posted using PostyBirb";
+    }
+    this.logger.log(JSON.stringify(json));
 
     let error = null;
     const files = [data.primary, ...data.additional];
     this.checkCancelled(cancellationToken);
+
+
+    if (data.options.spoiler) {
+      files[0].file.options.filename = `SPOILER_${files[0].file.options.filename}`;
+    }
+
+
+    var formData = { payload_json: JSON.stringify(json) };
+    var fileNum = 0;
     for (const file of files) {
+      fileNum++;
       if (data.options.spoiler) {
         file.file.options.filename = `SPOILER_${file.file.options.filename}`;
       }
+      formData["file" + fileNum] = file.file;
+    }
+    //Potential TODO: Split into seperate uploads if file size above discord limit.
 
-      const res = await Http.post<any>(accountData.webhook.trim(), '', {
-        data: { ...formData, file: file.file },
-        type: 'multipart',
-        skipCookies: true,
+    const res = await Http.post<any>(accountData.webhook.trim(), '', {
+      data: formData,
+      type: 'multipart',
+      skipCookies: true,
+    });
+
+    if (res.error || res.response.statusCode >= 300) {
+      error = this.createPostResponse({
+        error: res.error,
+        message: 'Webhook Failure',
+        additionalInfo: res.body,
       });
-
-      if (res.error || res.response.statusCode >= 300) {
-        error = this.createPostResponse({
-          error: res.error,
-          message: 'Webhook Failure',
-          additionalInfo: res.body,
-        });
-      }
     }
 
     if (error) {
+      this.logger.log(error);
       return Promise.reject(error);
     }
 
@@ -176,18 +228,20 @@ export class Discord extends Website {
       ),
     ];
 
+    //TODO: Dynamically calculate which files need to be scaled down to fit all files into 8MB limit. For now, simple max divided by amount of files will do I guess.
     const maxMB: number = 8;
+    this.maxMBPerFile = maxMB / files.length;
     files.forEach(file => {
       const { type, size, name, mimetype } = file;
-      if (FileSize.MBtoBytes(maxMB) < size) {
+      if (FileSize.MBtoBytes(this.maxMBPerFile) < size) {
         if (
           isAutoscaling &&
           type === FileSubmissionType.IMAGE &&
           ImageManipulator.isMimeType(mimetype)
         ) {
-          warnings.push(`${name} will be scaled down to ${maxMB}MB`);
+          warnings.push(`${name} will be scaled down to ${this.maxMBPerFile}MB`);
         } else {
-          problems.push(`Discord limits ${mimetype} to ${maxMB}MB`);
+          problems.push(`Discord limits ${mimetype} to ${this.maxMBPerFile}MB`);
         }
       }
     });

@@ -17,6 +17,7 @@ import { ParserService } from '../parser/parser.service';
 import { FilePostData } from './interfaces/file-post-data.interface';
 import { CancellationToken } from './cancellation/cancellation-token';
 import { CancellationException } from './cancellation/cancellation.exception';
+import { Injectable, Logger } from '@nestjs/common';
 
 export interface Poster {
   on(
@@ -89,6 +90,7 @@ export interface Poster {
 }
 
 export class Poster extends EventEmitter {
+  private readonly logger = new Logger(Poster.name);
   isPosting: boolean = false;
   isReady: boolean = false;
   isDone: boolean = false;
@@ -173,6 +175,7 @@ export class Poster extends EventEmitter {
       };
       if (error instanceof Error) {
         errorMsg.stack = error.stack;
+        this.logger.error(error.stack);
         errorMsg.error = error.message;
       } else {
         Object.assign(errorMsg, error);
@@ -197,10 +200,10 @@ export class Poster extends EventEmitter {
         const res = await (this.isFilePost(data)
           ? this.website.postFileSubmission(this.cancellationToken, data as any, accountData)
           : this.website.postNotificationSubmission(
-              this.cancellationToken,
-              data as any,
-              accountData,
-            ));
+            this.cancellationToken,
+            data as any,
+            accountData,
+          ));
         this.status = 'SUCCESS';
         this.done(res);
         return;
@@ -219,7 +222,7 @@ export class Poster extends EventEmitter {
       const random = _.random(0, 100);
       if (random > 90) {
         setTimeout(
-          function() {
+          function () {
             resolve({ website: this.part.website });
           }.bind(this),
           _.random(8000),
